@@ -84,6 +84,7 @@ sequenceDiagram
 ## 💻 Core Classes (Python)
 
 ```python
+from __future__ import annotations  # allows `X | None` hints on older Python
 from abc import ABC, abstractmethod
 from enum import Enum
 
