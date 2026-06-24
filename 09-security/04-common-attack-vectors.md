@@ -44,27 +44,29 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — user input is concatenated directly into the SQL string
-def get_user(username):
-    # The value of `username` becomes part of the SQL CODE, not just data
-    query = "SELECT * FROM users WHERE username = '" + username + "'"
-    # username = "admin' OR '1'='1" turns the WHERE clause always-true
-    return db.execute(query)
+```javascript
+// ❌ VULNERABLE — user input is concatenated directly into the SQL string
+async function getUser(username) {
+  // The value of `username` becomes part of the SQL CODE, not just data
+  const query = `SELECT * FROM users WHERE username = '${username}'`;
+  // username = "admin' OR '1'='1" turns the WHERE clause always-true
+  return db.query(query); // mysql2 / pg
+}
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — parameterized query: input is bound as DATA, never parsed as SQL
-def get_user(username):
-    query = "SELECT * FROM users WHERE username = %s"
-    # The driver sends the query and the value separately to the DB engine
-    return db.execute(query, (username,))
+```javascript
+// ✅ SECURE — parameterized query: input is bound as DATA, never parsed as SQL
+async function getUser(username) {
+  // The driver sends the query text and the value separately (mysql2 uses ?, pg uses $1)
+  return db.query("SELECT * FROM users WHERE username = ?", [username]);
+}
 
-# ✅ Even better — an ORM parameterizes automatically
-def get_user_orm(username):
-    return User.query.filter_by(username=username).first()  # SQLAlchemy binds safely
+// ✅ Even better — an ORM (Prisma) parameterizes automatically
+async function getUserOrm(username) {
+  return prisma.user.findUnique({ where: { username } }); // Prisma binds safely
+}
 ```
 
 ### 🎯 Interview Questions
@@ -182,29 +184,33 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — accepts a state-changing POST with no CSRF protection
-@app.route("/transfer", methods=["POST"])
-def transfer():
-    # Relies ONLY on the session cookie, which the browser attaches automatically
-    to_acct = request.form["to"]
-    amount = request.form["amount"]
-    do_transfer(session["user_id"], to_acct, amount)  # forged request succeeds
-    return "ok"
+```javascript
+// ❌ VULNERABLE — accepts a state-changing POST with no CSRF protection (Express)
+app.post("/transfer", (req, res) => {
+  // Relies ONLY on the session cookie, which the browser attaches automatically
+  const { to, amount } = req.body;
+  doTransfer(req.session.userId, to, amount); // forged cross-site request succeeds
+  res.send("ok");
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — require a per-session CSRF token that an attacker cannot know
-@app.route("/transfer", methods=["POST"])
-def transfer():
-    token = request.form.get("csrf_token")
-    if not token or not hmac.compare_digest(token, session.get("csrf_token", "")):
-        abort(403)  # reject forged cross-site requests
-    do_transfer(session["user_id"], request.form["to"], request.form["amount"])
-    return "ok"
-# Also set: Set-Cookie: session=...; HttpOnly; Secure; SameSite=Lax
+```javascript
+// ✅ SECURE — require a per-session CSRF token an attacker cannot know (Express)
+const crypto = require("crypto");
+app.post("/transfer", (req, res) => {
+  const token = req.body.csrfToken || "";
+  const expected = req.session.csrfToken || "";
+  // constant-time compare (equal length required); reject forged cross-site requests
+  if (token.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
+    return res.sendStatus(403);
+  }
+  doTransfer(req.session.userId, req.body.to, req.body.amount);
+  res.send("ok");
+});
+// Also configure the session cookie: { httpOnly: true, secure: true, sameSite: "lax" }
 ```
 
 ### 🎯 Interview Questions
@@ -251,25 +257,30 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — TLS certificate verification disabled
-import requests
-def fetch(url):
-    # verify=False accepts ANY certificate, including an attacker's forged one
-    return requests.get(url, verify=False)  # MITM can intercept/alter freely
+```javascript
+// ❌ VULNERABLE — TLS certificate verification disabled
+const https = require("https");
+const axios = require("axios");
+function fetch(url) {
+  // rejectUnauthorized:false accepts ANY cert, including an attacker's forged one
+  const agent = new https.Agent({ rejectUnauthorized: false });
+  return axios.get(url, { httpsAgent: agent }); // MITM can intercept/alter freely
+}
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — verify certificates (default) and pin a trusted CA bundle if needed
-import requests
-def fetch(url):
-    # verify=True (default) validates the server cert against trusted CAs
-    return requests.get(url, verify=True, timeout=10)
+```javascript
+// ✅ SECURE — verify certificates (default) and pin a cert/public key if needed
+const https = require("https");
+const axios = require("axios");
+function fetch(url) {
+  // rejectUnauthorized defaults to true — validates the server cert against trusted CAs
+  return axios.get(url, { timeout: 10000 });
+}
 
-# ✅ For native/mobile clients, pin the expected cert/public key to block rogue CAs
-# session.mount("https://api.example.com", FingerprintAdapter(EXPECTED_SHA256))
+// ✅ For high-value clients, pin the expected cert fingerprint to block rogue CAs
+// const agent = new https.Agent({ ca: TRUSTED_CA, checkServerIdentity: pinFingerprint });
 ```
 
 ### 🎯 Interview Questions
@@ -320,28 +331,29 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — an expensive endpoint with no rate limiting or protection
-@app.route("/search")
-def search():
-    q = request.args["q"]
-    # Each call runs a heavy, unbounded full-text scan — cheap to request, costly to serve
-    return expensive_full_table_search(q)  # L7 flood here exhausts CPU/DB
+```javascript
+// ❌ VULNERABLE — an expensive endpoint with no rate limiting or protection (Express)
+app.get("/search", async (req, res) => {
+  const q = req.query.q;
+  // Each call runs a heavy, unbounded full-text scan — cheap to request, costly to serve
+  res.json(await expensiveFullTableSearch(q)); // an L7 flood here exhausts CPU/DB
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — rate limit, cap work, and rely on edge protection for volume
-from flask_limiter import Limiter
-limiter = Limiter(key_func=lambda: request.headers.get("X-API-Key") or request.remote_addr)
-
-@app.route("/search")
-@limiter.limit("20/minute")          # throttle abusive clients (429 on excess)
-def search():
-    q = request.args.get("q", "")[:100]   # bound input size
-    return cached_search(q, max_results=50)  # cache + cap work per request
-# Plus: deploy behind Cloudflare/AWS Shield + WAF + autoscaling for volumetric/protocol layers
+```javascript
+// ✅ SECURE — rate limit, cap work, and rely on edge protection for volume
+const rateLimit = require("express-rate-limit");
+const searchLimiter = rateLimit({
+  windowMs: 60_000, max: 20,                       // 20 req/min per key (429 on excess)
+  keyGenerator: (req) => req.get("X-API-Key") || req.ip,
+});
+app.get("/search", searchLimiter, async (req, res) => {
+  const q = String(req.query.q || "").slice(0, 100);    // bound input size
+  res.json(await cachedSearch(q, { maxResults: 50 }));  // cache + cap work per request
+});
+// Plus: deploy behind Cloudflare/AWS Shield + WAF + autoscaling for volumetric/protocol layers
 ```
 
 ### 🎯 Interview Questions
@@ -388,32 +400,33 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — plaintext-ish password check + no session rotation/expiry
-def login(username, password):
-    user = User.query.filter_by(username=username).first()
-    if user and user.password == password:   # comparing plaintext / weak hash
-        session["user_id"] = user.id          # reuses any existing session id (fixation)
-        return "ok"                            # cookie not marked HttpOnly/Secure
-    return "fail"
+```javascript
+// ❌ VULNERABLE — plaintext password check + no session rotation/expiry
+async function login(req, username, password) {
+  const user = await User.findOne({ where: { username } });
+  if (user && user.password === password) {  // comparing plaintext / weak hash
+    req.session.userId = user.id;            // reuses any existing session id (fixation)
+    return "ok";                             // cookie not marked HttpOnly/Secure
+  }
+  return "fail";
+}
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — strong hashing, session rotation, hardened cookie, lockout handled upstream
-from argon2 import PasswordHasher
-ph = PasswordHasher()
-
-def login(username, password):
-    user = User.query.filter_by(username=username).first()
-    if user and ph.verify(user.password_hash, password):  # argon2 verify (constant-time)
-        session.clear()                       # rotate: drop any pre-set session id (anti-fixation)
-        session["user_id"] = user.id
-        session.permanent = True              # apply configured idle/absolute timeout
-        return "ok"
-    return "fail"
-# Cookie config: SESSION_COOKIE_HTTPONLY=True, _SECURE=True, _SAMESITE="Lax"
+```javascript
+// ✅ SECURE — strong hashing, session rotation, hardened cookie
+const argon2 = require("argon2");
+async function login(req, username, password) {
+  const user = await User.findOne({ where: { username } });
+  if (user && await argon2.verify(user.passwordHash, password)) { // argon2 verify (constant-time)
+    await new Promise((r) => req.session.regenerate(r));  // rotate session id (anti-fixation)
+    req.session.userId = user.id;
+    return "ok";
+  }
+  return "fail";
+}
+// express-session cookie config: { httpOnly: true, secure: true, sameSite: "lax", maxAge: ... }
 ```
 
 ### 🎯 Interview Questions
@@ -459,29 +472,26 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — fetches by id with NO ownership check
-@app.route("/api/invoices/<int:invoice_id>")
-@login_required
-def get_invoice(invoice_id):
-    # Any logged-in user can read ANY invoice by changing the id
-    invoice = Invoice.query.get(invoice_id)
-    return jsonify(invoice.to_dict())
+```javascript
+// ❌ VULNERABLE — fetches by id with NO ownership check (Express)
+app.get("/api/invoices/:id", requireLogin, async (req, res) => {
+  // Any logged-in user can read ANY invoice by changing the id
+  const invoice = await Invoice.findByPk(req.params.id);
+  res.json(invoice);
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — scope the lookup to the current user (object-level authorization)
-@app.route("/api/invoices/<int:invoice_id>")
-@login_required
-def get_invoice(invoice_id):
-    invoice = Invoice.query.filter_by(
-        id=invoice_id, owner_id=current_user.id    # wrong/other ids return None
-    ).first()
-    if invoice is None:
-        abort(404)                                  # don't reveal existence
-    return jsonify(invoice.to_dict())
+```javascript
+// ✅ SECURE — scope the lookup to the current user (object-level authorization)
+app.get("/api/invoices/:id", requireLogin, async (req, res) => {
+  const invoice = await Invoice.findOne({
+    where: { id: req.params.id, ownerId: req.user.id },  // wrong/other ids return null
+  });
+  if (!invoice) return res.sendStatus(404);  // don't reveal existence
+  res.json(invoice);
+});
 ```
 
 ### 🎯 Interview Questions
@@ -528,36 +538,38 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — fetches any user-supplied URL server-side
-@app.route("/fetch")
-def fetch():
-    url = request.args["url"]
-    # Attacker sets url=http://169.254.169.254/... to reach internal/metadata services
-    return requests.get(url, timeout=5).text
+```javascript
+// ❌ VULNERABLE — fetches any user-supplied URL server-side (Express)
+const axios = require("axios");
+app.get("/fetch", async (req, res) => {
+  const url = req.query.url;
+  // Attacker sets url=http://169.254.169.254/... to reach internal/metadata services
+  const r = await axios.get(url, { timeout: 5000 });
+  res.send(r.data);
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — allowlist host + block internal IPs + restrict scheme
-import ipaddress, socket
-from urllib.parse import urlparse
-ALLOWED_HOSTS = {"api.partner.com", "images.cdn.com"}
+```javascript
+// ✅ SECURE — allowlist host + block internal IPs + restrict scheme (Express)
+const dns = require("dns").promises;
+const axios = require("axios");
+const ALLOWED_HOSTS = new Set(["api.partner.com", "images.cdn.com"]);
 
-def is_safe(url):
-    p = urlparse(url)
-    if p.scheme != "https" or p.hostname not in ALLOWED_HOSTS:  # scheme + host allowlist
-        return False
-    ip = ipaddress.ip_address(socket.gethostbyname(p.hostname))  # resolve then check
-    return not (ip.is_private or ip.is_loopback or ip.is_link_local)  # block internal/metadata
+async function isSafe(raw) {
+  const u = new URL(raw);
+  if (u.protocol !== "https:" || !ALLOWED_HOSTS.has(u.hostname)) return false; // scheme + host allowlist
+  const { address } = await dns.lookup(u.hostname);  // resolve THEN check (DNS-rebinding aware)
+  // block private (10/172.16-31/192.168), loopback (127), link-local/metadata (169.254)
+  return !/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(address);
+}
 
-@app.route("/fetch")
-def fetch():
-    url = request.args["url"]
-    if not is_safe(url):
-        abort(400)
-    return requests.get(url, timeout=5, allow_redirects=False).text  # no redirect to bypass
+app.get("/fetch", async (req, res) => {
+  if (!(await isSafe(req.query.url))) return res.sendStatus(400);
+  const r = await axios.get(req.query.url, { maxRedirects: 0 }); // no redirect bypass
+  res.send(r.data);
+});
 ```
 
 ### 🎯 Interview Questions
@@ -595,7 +607,7 @@ sequenceDiagram
 - **Numerous router/IoT/CCTV CVEs:** unsanitized parameters passed to shell commands in firmware have enabled mass device takeover (feeding botnets like Mirai).
 
 ### 🛡️ Prevention Measures
-1. **Avoid the shell entirely** — call programs directly with an argument array (`subprocess.run([...], shell=False)`); the OS treats each arg as data, not parseable shell syntax.
+1. **Avoid the shell entirely** — call programs directly with an argument array (`execFile`/`spawn` in Node, `subprocess.run([...], shell=False)` in Python); the OS treats each arg as data, not parseable shell syntax.
 2. **Prefer native libraries over shelling out** — e.g., use a language's file/image library instead of invoking CLI tools.
 3. **Strict allowlist validation** of any value that must reach a command (e.g., filenames matching `^[\w.-]+$`).
 4. **Never pass user input as shell options/flags**; separate flags from values; reject path traversal (`..`).
@@ -603,25 +615,28 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — user input goes into a shell string
-import os
-def make_thumbnail(filename):
-    # shell parses ;, |, && — filename = "a.jpg; rm -rf /" runs extra commands
-    os.system("convert " + filename + " -resize 100x100 thumb.png")
+```javascript
+// ❌ VULNERABLE — user input goes into a shell string
+const { exec } = require("child_process");
+function makeThumbnail(filename) {
+  // a shell parses ;, |, && — filename = "a.jpg; rm -rf /" runs extra commands
+  exec(`convert ${filename} -resize 100x100 thumb.png`, () => {});
+}
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — no shell; pass arguments as a list + validate the filename
-import subprocess, re
-def make_thumbnail(filename):
-    if not re.fullmatch(r"[\w.-]+\.(jpg|png)", filename):   # allowlist safe filenames
-        raise ValueError("invalid filename")
-    # shell=False: each list item is a literal argument, never parsed as shell syntax
-    subprocess.run(["convert", filename, "-resize", "100x100", "thumb.png"],
-                   shell=False, check=True, timeout=30)
+```javascript
+// ✅ SECURE — no shell; pass arguments as an array + validate the filename
+const { execFile } = require("child_process");
+function makeThumbnail(filename) {
+  if (!/^[\w.-]+\.(jpg|png)$/.test(filename)) {  // allowlist safe filenames
+    throw new Error("invalid filename");
+  }
+  // execFile does NOT spawn a shell — each arg is literal data, never parsed as shell syntax
+  execFile("convert", [filename, "-resize", "100x100", "thumb.png"],
+           { timeout: 30000 }, () => {});
+}
 ```
 
 ### 🎯 Interview Questions
@@ -667,34 +682,33 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — mass assignment + no admin check
-@app.route("/api/users/<int:uid>", methods=["PATCH"])
-@login_required
-def update_user(uid):
-    user = User.query.get(uid)
-    for key, value in request.json.items():
-        setattr(user, key, value)   # client can set role="admin" (privilege escalation)
-    db.session.commit()
-    return "ok"
+```javascript
+// ❌ VULNERABLE — mass assignment + no admin check (Express)
+app.patch("/api/users/:id", requireLogin, async (req, res) => {
+  const user = await User.findByPk(req.params.id);
+  Object.assign(user, req.body);   // client can set role:"admin" (privilege escalation)
+  await user.save();
+  res.send("ok");
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — allowlist fields, enforce ownership, separate admin-only changes
-ALLOWED = {"display_name", "email"}   # role/is_admin NOT user-editable
-
-@app.route("/api/users/<int:uid>", methods=["PATCH"])
-@login_required
-def update_user(uid):
-    if uid != current_user.id and not current_user.is_admin:  # function + object authz
-        abort(403)
-    user = User.query.get_or_404(uid)
-    for key in (request.json.keys() & ALLOWED):   # only allowlisted fields applied
-        setattr(user, key, request.json[key])
-    db.session.commit()
-    return "ok"
+```javascript
+// ✅ SECURE — allowlist fields, enforce ownership + admin check (Express)
+const ALLOWED = ["displayName", "email"];   // role / isAdmin are NOT user-editable
+app.patch("/api/users/:id", requireLogin, async (req, res) => {
+  if (Number(req.params.id) !== req.user.id && !req.user.isAdmin) { // function + object authz
+    return res.sendStatus(403);
+  }
+  const user = await User.findByPk(req.params.id);
+  if (!user) return res.sendStatus(404);
+  for (const key of ALLOWED) {                // only allowlisted fields applied
+    if (key in req.body) user[key] = req.body[key];
+  }
+  await user.save();
+  res.send("ok");
+});
 ```
 
 ### 🎯 Interview Questions
@@ -742,29 +756,28 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — hardcoded secret, weak hash, logs sensitive data
-import hashlib, logging
-API_KEY = "sk_live_9f8a7b6c5d4e"          # secret committed to source control
-def register(email, password):
-    pw_hash = hashlib.md5(password.encode()).hexdigest()  # MD5 is broken, unsalted
-    logging.info(f"Registering {email} with password {password}")  # logs plaintext PII
-    save_user(email, pw_hash)
+```javascript
+// ❌ VULNERABLE — hardcoded secret, weak hash, logs sensitive data
+const crypto = require("crypto");
+const API_KEY = "sk_live_9f8a7b6c5d4e";        // secret committed to source control
+function register(email, password) {
+  const pwHash = crypto.createHash("md5").update(password).digest("hex"); // MD5 broken, unsalted
+  console.log(`Registering ${email} with password ${password}`);          // logs plaintext PII
+  saveUser(email, pwHash);
+}
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — secret from manager, strong salted hash, no sensitive logging
-import os, logging
-from argon2 import PasswordHasher
-ph = PasswordHasher()
-API_KEY = os.environ["API_KEY"]           # injected from secrets manager, not in code
-
-def register(email, password):
-    pw_hash = ph.hash(password)            # argon2: salted + slow, resists cracking
-    logging.info("Registering user id=%s", mask(email))  # mask PII, never log password
-    save_user(email, pw_hash)             # DB/backups encrypted at rest via KMS
+```javascript
+// ✅ SECURE — secret from env/secrets manager, strong salted hash, no sensitive logging
+const argon2 = require("argon2");
+const API_KEY = process.env.API_KEY;            // injected from secrets manager, not in code
+async function register(email, password) {
+  const pwHash = await argon2.hash(password);   // argon2: salted + slow, resists cracking
+  console.log("Registering user", mask(email)); // mask PII, never log the password
+  await saveUser(email, pwHash);                // DB/backups encrypted at rest via KMS
+}
 ```
 
 ### 🎯 Interview Questions
@@ -802,34 +815,36 @@ sequenceDiagram
 - **Document/SVG/Office-format upload features** (which are XML under the hood) have repeatedly been exploited via XXE to exfiltrate server files.
 
 ### 🛡️ Prevention Measures
-1. **Disable DTDs and external entities** in the XML parser (the definitive fix) — e.g., `defusedxml` in Python, `setFeature(disallow-doctype-decl, true)` in Java.
+1. **Disable DTDs and external entities** in the XML parser (the definitive fix) — e.g., don't set `noent` and disable `dtdload` with `libxmljs2` in Node, `defusedxml` in Python, `setFeature(disallow-doctype-decl, true)` in Java.
 2. **Prefer less complex data formats** — use JSON instead of XML where possible (no entity expansion).
-3. **Use safe libraries** — `defusedxml` hardens Python's parsers against XXE and entity-expansion bombs.
+3. **Use safe libraries / settings** — e.g., `fast-xml-parser` with `processEntities:false` (Node) or `defusedxml` (Python) harden parsers against XXE and entity-expansion bombs.
 4. **Validate/whitelist** uploaded document types and parse them in a sandbox.
 5. **Patch/configure parsers** — keep XML libraries updated; never enable external entity resolution for untrusted input.
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — default lxml/ElementTree parsing resolves external entities
-import lxml.etree as ET
-def parse(xml_bytes):
-    # Attacker XML can declare <!ENTITY x SYSTEM "file:///etc/passwd"> and read files
-    parser = ET.XMLParser()                 # external entities not disabled
-    return ET.fromstring(xml_bytes, parser)
+```javascript
+// ❌ VULNERABLE — parser resolves external entities (noent:true expands them)
+const libxmljs = require("libxmljs2");
+function parse(xml) {
+  // noent:true expands <!ENTITY x SYSTEM "file:///etc/passwd"> and reads files
+  return libxmljs.parseXml(xml, { noent: true, dtdload: true });
+}
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — use defusedxml, which disables DTDs/external entities/entity bombs
-import defusedxml.ElementTree as ET
-def parse(xml_bytes):
-    # defusedxml raises on DTDs/external entities by default
-    return ET.fromstring(xml_bytes)
+```javascript
+// ✅ SECURE — disable DTD loading + entity expansion + network access
+const libxmljs = require("libxmljs2");
+function parse(xml) {
+  // noent:false (don't expand entities), dtdload:false, nonet:true (no network)
+  return libxmljs.parseXml(xml, { noent: false, dtdload: false, nonet: true });
+}
 
-# ✅ Or with lxml: explicitly forbid DTDs and entity resolution
-# parser = lxml.etree.XMLParser(resolve_entities=False, no_network=True, dtd_validation=False)
+// ✅ Or avoid XML entities entirely with a parser that doesn't process them
+// const { XMLParser } = require("fast-xml-parser");
+// const data = new XMLParser({ processEntities: false }).parse(xml);
 ```
 
 ### 🎯 Interview Questions
@@ -882,23 +897,23 @@ sequenceDiagram
 </form>
 ```
 
-```python
-# ❌ No framing protection on responses
-@app.route("/transfer-page")
-def transfer_page():
-    return render_template("transfer.html")   # missing security headers
+```javascript
+// ❌ No framing protection on responses (Express)
+app.get("/transfer-page", (req, res) => {
+  res.render("transfer.html");   // missing security headers — page can be framed
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — send anti-framing headers on every response
-@app.after_request
-def set_frame_protection(resp):
-    resp.headers["X-Frame-Options"] = "DENY"                  # legacy browsers
-    resp.headers["Content-Security-Policy"] = "frame-ancestors 'self'"  # modern, preferred
-    return resp
-# Now other origins cannot frame the page, so click overlays are impossible.
+```javascript
+// ✅ SECURE — send anti-framing headers on every response (Express + helmet)
+const helmet = require("helmet");
+app.use(helmet.frameguard({ action: "deny" }));   // X-Frame-Options: DENY (legacy browsers)
+app.use(helmet.contentSecurityPolicy({
+  directives: { "frame-ancestors": ["'self'"] },   // modern, preferred
+}));
+// Now other origins cannot frame the page, so click overlays are impossible.
 ```
 
 ### 🎯 Interview Questions
@@ -947,37 +962,36 @@ sequenceDiagram
 
 ### 💻 Vulnerable Code Example
 
-```python
-# ❌ VULNERABLE — unlimited login attempts, no MFA, leaks which accounts exist
-@app.route("/login", methods=["POST"])
-def login():
-    user = User.query.filter_by(email=request.form["email"]).first()
-    if not user:
-        return "No such user", 404          # user enumeration
-    if user.check_password(request.form["password"]):  # unlimited tries allowed
-        login_user(user)
-        return "ok"
-    return "Wrong password", 401
+```javascript
+// ❌ VULNERABLE — unlimited attempts, no MFA, leaks which accounts exist (Express)
+app.post("/login", async (req, res) => {
+  const user = await User.findOne({ where: { email: req.body.email } });
+  if (!user) return res.status(404).send("No such user");   // user enumeration
+  if (await user.checkPassword(req.body.password)) {        // unlimited tries allowed
+    loginUser(req, user);
+    return res.send("ok");
+  }
+  res.status(401).send("Wrong password");
+});
 ```
 
 ### ✅ Secure Code Example
 
-```python
-# ✅ SECURE — rate limit, generic errors, breached-password check, MFA hook
-from flask_limiter import Limiter
-limiter = Limiter(key_func=lambda: request.form.get("email", request.remote_addr))
-
-@app.route("/login", methods=["POST"])
-@limiter.limit("5/minute;20/hour")          # throttle per account+IP, slows stuffing
-def login():
-    user = User.query.filter_by(email=request.form["email"]).first()
-    pw = request.form["password"]
-    # constant-time, identical response whether or not the user exists (no enumeration)
-    if user and user.check_password(pw) and not is_pwned(pw):
-        if user.mfa_enabled:
-            return start_mfa_challenge(user)   # require second factor
-        login_user(user); return "ok"
-    return "Invalid credentials", 401          # generic message
+```javascript
+// ✅ SECURE — rate limit, generic errors, breached-password check, MFA hook (Express)
+const rateLimit = require("express-rate-limit");
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 5,   // throttle per key, slows stuffing
+  keyGenerator: (req) => req.body.email || req.ip });
+app.post("/login", loginLimiter, async (req, res) => {
+  const user = await User.findOne({ where: { email: req.body.email } });
+  const pw = req.body.password;
+  // identical response whether or not the user exists (no enumeration)
+  if (user && await user.verifyPassword(pw) && !(await isPwned(pw))) {
+    if (user.mfaEnabled) return startMfaChallenge(res, user);  // require second factor
+    loginUser(req, user); return res.send("ok");
+  }
+  res.status(401).send("Invalid credentials");                 // generic message
+});
 ```
 
 ### 🎯 Interview Questions
